@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, text
 import pandas as pd
 import sys
 import logging
+from logging.handlers import RotatingFileHandler # 追加
 from datetime import datetime, timedelta, timezone
 import copy
 
@@ -18,7 +19,13 @@ sys.stdout.reconfigure(line_buffering=True)
 # 日本時間(JST)の設定
 JST = timezone(timedelta(hours=+9), 'JST')
 
-# ログの設定
+# ログ保存用ディレクトリの作成
+LOG_DIR = "/logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+LOG_FILE = os.path.join(LOG_DIR, "app.log")
+
+# ログの時間をJSTにするためのカスタムフォーマッタ
 class JSTFormatter(logging.Formatter):
     def converter(self, timestamp):
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -28,14 +35,33 @@ class JSTFormatter(logging.Formatter):
         if datefmt: return dt.strftime(datefmt)
         return dt.isoformat()
 
+# ロガーの基本設定
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Streamlitの再実行によるハンドラ重複を防ぐ
 if logger.hasHandlers():
     logger.handlers.clear()
-handler = logging.StreamHandler(sys.stdout)
+
+# 共通のフォーマット定義
 formatter = JSTFormatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+
+# 1. コンソール出力用ハンドラ
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+# 2. ファイル出力用ハンドラ (5MB x 5世代)
+file_handler = RotatingFileHandler(
+    LOG_FILE, 
+    maxBytes=5*1024*1024, # 5MB
+    backupCount=5,         # 5世代
+    encoding='utf-8'
+)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 他のライブラリのログ混入を防ぐ
 logger.propagate = False
 
 def format_time(time_str):

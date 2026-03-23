@@ -26,6 +26,7 @@ services:
     container_name: check-jara-app
     volumes:
       - ./app:/app
+      - ./logs:/logs
     ports:
       - "8501:8501"
     environment:
