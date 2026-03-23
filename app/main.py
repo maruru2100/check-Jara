@@ -121,31 +121,64 @@ def parse_jara_html(html_content):
 
 # --- 保存ロジック ---
 def save_to_db(data, regatta_name, event_name):
-    logger.info(f"=== DB保存プロセス開始 (総レース数: {len(data)}) ===")
+    logger.info(f"=== DB保存プロセス開始 (大会: {regatta_name} / 種目: {event_name}) ===")
+    
     with engine.begin() as conn:
+        # 1. 大会IDの取得または作成
         conn.execute(text("INSERT INTO regattas (name) VALUES (:n) ON CONFLICT (name) DO NOTHING"), {"n": regatta_name})
         r_id = conn.execute(text("SELECT id FROM regattas WHERE name=:n"), {"n": regatta_name}).fetchone()[0]
-        conn.execute(text("INSERT INTO events (regatta_id, event_name) VALUES (:r, :e) ON CONFLICT (regatta_id, event_name) DO NOTHING"), {"r": r_id, "e": event_name})
-        e_id = conn.execute(text("SELECT id FROM events WHERE regatta_id=:r AND event_name=:e"), {"r": r_id, "e": event_name}).fetchone()[0]
+        
+        # 2. 同一大会内に同じ種目が既に存在するか確認
+        existing_event = conn.execute(text(
+            "SELECT id FROM events WHERE regatta_id=:r AND event_name=:e"
+        ), {"r": r_id, "e": event_name}).fetchone()
 
+        if existing_event:
+            e_id = existing_event[0]
+            logger.info(f"⚠️ 既存データを発見 (Event ID: {e_id})。重複防止のため関連データを一括削除します。")
+            
+            # 3. 既存のレースに関連するデータをカスケード削除
+            # (テーブル定義に ON DELETE CASCADE があれば races の削除だけで済みますが、念のため明示的に消します)
+            conn.execute(text("""
+                DELETE FROM split_times WHERE crew_id IN (
+                    SELECT id FROM crews WHERE race_id IN (
+                        SELECT id FROM races WHERE event_id = :e
+                    )
+                )
+            """), {"e": e_id})
+            
+            conn.execute(text("""
+                DELETE FROM crew_members WHERE crew_id IN (
+                    SELECT id FROM crews WHERE race_id IN (
+                        SELECT id FROM races WHERE event_id = :e
+                    )
+                )
+            """), {"e": e_id})
+            
+            conn.execute(text("DELETE FROM crews WHERE race_id IN (SELECT id FROM races WHERE event_id = :e)"), {"e": e_id})
+            conn.execute(text("DELETE FROM races WHERE event_id = :e"), {"e": e_id})
+            
+            logger.info(f"✅ 既存の全 {event_name} データを削除しました。")
+        else:
+            # 新規種目の作成
+            conn.execute(text("INSERT INTO events (regatta_id, event_name) VALUES (:r, :e)"), {"r": r_id, "e": event_name})
+            e_id = conn.execute(text("SELECT id FROM events WHERE regatta_id=:r AND event_name=:e"), {"r": r_id, "e": event_name}).fetchone()[0]
+
+    # 4. 各レースの保存（ここは以前のロジックを継続）
     for r in data:
         r_no = int(r['race_no']) if str(r['race_no']).isdigit() else 0
         try:
             with engine.begin() as conn:
                 logger.info(f"--- レース No.{r_no} ({r.get('race_round')}) 保存処理 ---")
-                existing_race = conn.execute(text("SELECT id FROM races WHERE event_id=:e AND race_no=:n"), {"e": e_id, "n": r_no}).fetchone()
-                if existing_race:
-                    rid = existing_race[0]
-                    conn.execute(text("DELETE FROM split_times WHERE crew_id IN (SELECT id FROM crews WHERE race_id=:id)"), {"id": rid})
-                    conn.execute(text("DELETE FROM crew_members WHERE crew_id IN (SELECT id FROM crews WHERE race_id=:id)"), {"id": rid})
-                    conn.execute(text("DELETE FROM crews WHERE race_id=:id"), {"id": rid})
-                    conn.execute(text("DELETE FROM races WHERE id=:id"), {"id": rid})
-
-                race_id = conn.execute(text("INSERT INTO races (event_id, race_no, race_round) VALUES (:e, :n, :ro) RETURNING id"), {"e": e_id, "n": r_no, "ro": r['race_round']}).fetchone()[0]
+                
+                # レース保存 (冒頭で一括削除しているため、ここでは INSERT のみでOK)
+                race_id = conn.execute(text("INSERT INTO races (event_id, race_no, race_round) VALUES (:e, :n, :ro) RETURNING id"), 
+                                       {"e": e_id, "n": r_no, "ro": r['race_round']}).fetchone()[0]
 
                 for res in r['results']:
                     member_count = len(res['members'])
                     logger.info(f"    [クルー保存] {res['team_name']} (選手数: {member_count}, Lane: {res['lane_no']})")
+                    
                     def safe_int(s):
                         if not s: return None
                         s_str = "".join(filter(str.isdigit, str(s)))
@@ -153,25 +186,47 @@ def save_to_db(data, regatta_name, event_name):
 
                     splits = res.get('splits', [])
                     total_time_raw = splits[3] if len(splits) > 3 else None
-                    c_id = conn.execute(text("INSERT INTO crews (race_id, team_name, lane_no, rank_in_race, total_time) VALUES (:ri, :t, :l, :ra, :ti) RETURNING id"), 
-                                       {"ri": race_id, "t": res['team_name'], "l": safe_int(res['lane_no']), "ra": safe_int(res['rank']), "ti": format_time(total_time_raw)}).fetchone()[0]
+                    
+                    c_id = conn.execute(text("""
+                        INSERT INTO crews (race_id, team_name, lane_no, rank_in_race, total_time) 
+                        VALUES (:ri, :t, :l, :ra, :ti) RETURNING id
+                    """), {
+                        "ri": race_id, "t": res['team_name'], 
+                        "l": safe_int(res['lane_no']), "ra": safe_int(res['rank']), 
+                        "ti": format_time(total_time_raw)
+                    }).fetchone()[0]
+                    
                     for dist, s_time in zip([500, 1000, 1500], splits[:3]):
                         f_time = format_time(s_time)
-                        if f_time: conn.execute(text("INSERT INTO split_times (crew_id, distance_meters, split_time) VALUES (:ci, :d, :st)"), {"ci": c_id, "d": dist, "st": f_time})
+                        if f_time:
+                            conn.execute(text("INSERT INTO split_times (crew_id, distance_meters, split_time) VALUES (:ci, :d, :st)"),
+                                         {"ci": c_id, "d": dist, "st": f_time})
+                    
                     for m in res['members']:
-                        conn.execute(text("INSERT INTO rowers (kana, kanji) VALUES (:ka, :kj) ON CONFLICT (kana, kanji) DO NOTHING"), {"ka": m['kana'], "kj": m['kanji']})
-                        rower_id = conn.execute(text("SELECT id FROM rowers WHERE kana=:ka AND kanji=:kj"), {"ka": m['kana'], "kj": m['kanji']}).fetchone()[0]
+                        # rowers, rower_profiles は重複して良いので ON CONFLICT
+                        conn.execute(text("INSERT INTO rowers (kana, kanji) VALUES (:ka, :kj) ON CONFLICT (kana, kanji) DO NOTHING"), 
+                                     {"ka": m['kana'], "kj": m['kanji']})
+                        rower_id = conn.execute(text("SELECT id FROM rowers WHERE kana=:ka AND kanji=:kj"), 
+                                                {"ka": m['kana'], "kj": m['kanji']}).fetchone()[0]
+                        
                         try: h_val = float(m['h']) if m['h'] and m['h'] != '-' else None
                         except: h_val = None
                         try: w_val = float(m['w']) if m['w'] and m['w'] != '-' else None
                         except: w_val = None
-                        conn.execute(text("INSERT INTO rower_profiles (rower_id, year, affiliation, height, weight) VALUES (:rid, 2025, :aff, :h, :w) ON CONFLICT (rower_id, year) DO UPDATE SET height=:h, weight=:w, affiliation=:aff"), 
-                                     {"rid": rower_id, "aff": res['team_name'], "h": h_val, "w": w_val})
-                        conn.execute(text("INSERT INTO crew_members (crew_id, rower_id, position) VALUES (:ci, :ri, :p)"), {"ci": c_id, "ri": rower_id, "p": m['pos']})
+
+                        conn.execute(text("""
+                            INSERT INTO rower_profiles (rower_id, year, affiliation, height, weight) 
+                            VALUES (:rid, 2025, :aff, :h, :w) 
+                            ON CONFLICT (rower_id, year) DO UPDATE SET height=:h, weight=:w, affiliation=:aff
+                        """), {"rid": rower_id, "aff": res['team_name'], "h": h_val, "w": w_val})
+                        
+                        conn.execute(text("INSERT INTO crew_members (crew_id, rower_id, position) VALUES (:ci, :ri, :p)"),
+                                     {"ci": c_id, "ri": rower_id, "p": m['pos']})
             logger.info(f"--- レース No.{r_no} 保存成功 ---")
         except Exception as e:
             logger.error(f"レース No.{r_no} の保存中にエラー: {e}")
             continue
+
     logger.info("=== DB保存プロセス終了 ===")
 
 # --- Streamlit UI ---
@@ -194,18 +249,38 @@ with tab2:
     if st.button("URLから取得して保存"):
         if url:
             try:
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-                session = requests.Session()
-                with st.spinner('データを取得中...'):
-                    res = session.get(url, headers=headers, timeout=20)
-                    res.raise_for_status()
-                    res.encoding = res.apparent_encoding
+                # ブラウザに見せかけるためのヘッダー
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
                 
-                data, reg_name, event_name = parse_jara_html(res.text)
-                st.info(f"取得成功: {reg_name} / {event_name}")
-                save_to_db(data, reg_name, event_name)
-                st.success(f"{len(data)} レースの保存が完了しました。")
+                res_text = ""
+                success_fetch = False
+                
+                with st.spinner('データを取得中... (最大3回リトライします)'):
+                    for i in range(3): # 3回までリトライ
+                        try:
+                            res = requests.get(url, headers=headers, timeout=15)
+                            res.raise_for_status()
+                            res.encoding = res.apparent_encoding
+                            res_text = res.text
+                            success_fetch = True
+                            break # 成功したらループを抜ける
+                        except requests.exceptions.RequestException as e:
+                            if i < 2:
+                                logger.warning(f"取得失敗。5秒後に再試行します... ({i+1}/3): {e}")
+                                time.sleep(5) # 5秒待機
+                            else:
+                                raise e # 3回ダメならエラーを投げる
+                
+                if success_fetch:
+                    data, reg_name, event_name = parse_jara_html(res_text)
+                    st.info(f"取得成功: {reg_name} / {event_name}")
+                    save_to_db(data, reg_name, event_name)
+                    st.success(f"{len(data)} レースの保存（上書き）が完了しました。")
+                    
             except Exception as e:
-                st.error(f"URLからの取得に失敗しました: {e}")
+                st.error(f"URLからの取得に失敗しました。時間をおいて再度お試しください。: {e}")
+                logger.error(f"URL取得エラー: {e}")
         else:
             st.warning("URLを入力してください。")
