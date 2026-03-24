@@ -4,9 +4,9 @@ services:
     container_name: check-jara-db
     restart: always
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: check_jara_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
@@ -15,7 +15,7 @@ services:
   flyway:
     image: flyway/flyway:10
     container_name: check-jara-flyway
-    command: -url=jdbc:postgresql://db:5432/check_jara_db -user=user -password=password -connectRetries=60 migrate
+    command: -url=jdbc:postgresql://db:5432/${POSTGRES_DB} -user=${POSTGRES_USER} -password=${POSTGRES_PASSWORD} -connectRetries=60 migrate
     volumes:
       - ./db/sql:/flyway/sql
     depends_on:
@@ -30,7 +30,7 @@ services:
     ports:
       - "8501:8501"
     environment:
-      - DATABASE_URL=postgresql://user:password@db:5432/check_jara_db
+      - DATABASE_URL=${DATABASE_URL}
     depends_on:
       db:
         condition: service_started
