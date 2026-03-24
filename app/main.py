@@ -10,6 +10,8 @@ import logging
 from logging.handlers import RotatingFileHandler # 追加
 from datetime import datetime, timedelta, timezone
 import copy
+import re
+from urllib.parse import urljoin
 
 # --- 初期設定 ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -63,6 +65,28 @@ logger.addHandler(file_handler)
 
 # 他のライブラリのログ混入を防ぐ
 logger.propagate = False
+
+def get_race_urls_from_top(top_url, html_content):
+    """大会Topページから種目URL一覧を抽出する"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    race_urls = []
+    main_content = soup.find('div', id='main')
+    if not main_content:
+        return []
+    
+    # 種目リンク（.html）を抽出
+    for a in main_content.find_all('a', href=True):
+        href = a['href']
+        if '.html' in href and 'index' not in href and '#' not in href:
+            full_url = urljoin(top_url, href)
+            if full_url not in race_urls:
+                race_urls.append(full_url)
+    
+    # リンクが極端に少ない（例: 戻るボタン1つだけ等）場合は大会Topとみなさない
+    if len(race_urls) <= 1:
+        return []
+        
+    return race_urls
 
 def format_time(time_str):
     """ '07:39.87' -> '00:07:39.87' """
@@ -300,10 +324,43 @@ with tab2:
                                 raise e # 3回ダメならエラーを投げる
                 
                 if success_fetch:
+                    # ログ用: 処理開始
+                    logger.info(f"URL解析開始: {url}")
+                    
+                    # A. まずは「単一種目ページ」として解析を試みる
                     data, reg_name, event_name = parse_jara_html(res_text)
-                    st.info(f"取得成功: {reg_name} / {event_name}")
-                    save_to_db(data, reg_name, event_name)
-                    st.success(f"{len(data)} レースの保存（上書き）が完了しました。")
+                    
+                    if data:
+                        # --- 通常モード（種目データが見つかった場合） ---
+                        st.info(f"取得成功: {reg_name} / {event_name}")
+                        save_to_db(data, reg_name, event_name)
+                        st.success(f"{len(data)} レースの保存（上書き）が完了しました。")
+                    else:
+                        # B. 種目データがない場合のみ「大会Top」としてのリンク抽出を試みる
+                        child_urls = get_race_urls_from_top(url, res_text)
+                        
+                        if child_urls:
+                            # --- 一括取得モード ---
+                            st.info(f"大会Topページを検出しました。{len(child_urls)}種目の取り込みを開始します。")
+                            progress_bar = st.progress(0)
+                            for idx, c_url in enumerate(child_urls):
+                                try:
+                                    time.sleep(2)  # 次の種目に行く前に2秒休む
+                                    c_res = requests.get(c_url, headers=headers, timeout=10)
+                                    c_res.raise_for_status()
+                                    c_res.encoding = c_res.apparent_encoding
+                                    c_data, c_reg, c_eve = parse_jara_html(c_res.text)
+                                    if c_data:
+                                        save_to_db(c_data, c_reg, c_eve)
+                                        st.write(f"✅ {c_eve} 完了")
+                                except Exception as inner_e:
+                                    st.warning(f"⚠️ スキップ: {c_url} ({inner_e})")
+                                    logger.error(f"一括取得中の個別エラー ({c_url}): {inner_e}")
+                                progress_bar.progress((idx + 1) / len(child_urls))
+                            st.success("大会全種目の一括保存が完了しました。")
+                        else:
+                            st.error("レース結果または種目リンクが見つかりませんでした。")
+                            logger.warning(f"データ未検出: {url}")
                     
             except Exception as e:
                 st.error(f"URLからの取得に失敗しました。時間をおいて再度お試しください。: {e}")
