@@ -37,5 +37,20 @@ services:
       flyway:
         condition: service_completed_successfully
 
+  metabase:
+    image: metabase/metabase:latest
+    container_name: check-jara-metabase
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase_data:/metabase.db
+    environment:
+      - MB_DB_TYPE=h2
+      - MB_DB_FILE=/metabase.db/metabase.db
+    depends_on:
+      - db
+
 volumes:
   postgres_data:
+  metabase_data:
