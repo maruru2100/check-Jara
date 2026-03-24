@@ -50,6 +50,23 @@ services:
       - MB_DB_FILE=/metabase.db/metabase.db
     depends_on:
       - db
+  
+  db-backup:
+    image: prodrigestivill/postgres-backup-local:15
+    container_name: check-jara-db-backup
+    restart: always
+    environment:
+      - POSTGRES_HOST=db
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - SCHEDULE=0 18 * * * # ★毎日18:00に実行
+      - BACKUP_KEEP_DAYS=14        # 7日間保持
+      - BACKUP_SUFFIX=.sql.gz     # 圧縮して保存
+    volumes:
+      - ./backups:/backups        # ホストの ./backups に保存
+    depends_on:
+      - db
 
 volumes:
   postgres_data:

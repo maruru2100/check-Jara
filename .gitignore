@@ -5,3 +5,6 @@
 logs/*.log*
 logs/*
 !.gitkeep
+
+# バックアップファイルの除外
+backups/
