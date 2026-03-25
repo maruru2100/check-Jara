@@ -316,6 +316,25 @@ def update_regatta_meta(regatta_name, start_date, location):
         """), {"name": regatta_name, "sd": start_date, "loc": location})
         logger.info(f"大会メタ情報を更新/作成: {regatta_name} (開始日: {start_date}, 場所: {location})")
 
+def get_regatta_summary():
+    """登録済みの大会一覧と、その大会に紐づくデータ件数を取得する"""
+    query = text("""
+        SELECT 
+            r.name as "大会名",
+            r.start_date as "開催日",
+            r.location as "場所",
+            COUNT(c.id) as "登録データ数"
+        FROM regattas r
+        LEFT JOIN events e ON r.id = e.regatta_id
+        LEFT JOIN races ra ON e.id = ra.event_id
+        LEFT JOIN crews c ON ra.id = c.race_id
+        GROUP BY r.id, r.name, r.start_date, r.location
+        ORDER BY r.start_date DESC, r.name ASC
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn)
+    return df
+
 # --- Streamlit UI ---
 st.title("Rowing Race Results Parser")
 
@@ -330,6 +349,37 @@ with tab1:
             st.info(f"大会: {reg_name} / 種目: {event_name}")
             save_to_db(data, reg_name, event_name)
             st.success(f"{len(data)} レースの保存が完了しました。")
+    
+    st.divider()
+    st.subheader("📊 登録済み大会サマリー")
+
+    try:
+        summary_df = get_regatta_summary()
+        if not summary_df.empty:
+            # 日付の表示形式を調整
+            summary_df['開催日'] = summary_df['開催日'].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else "未設定"
+            )
+            
+            st.dataframe(
+                summary_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "登録データ数": st.column_config.NumberColumn(
+                        "登録済み件数",
+                        help="紐づいているクルー（着順）データの総数です",
+                        format="%d 件"
+                    )
+                }
+            )
+            
+            if st.button("表示を更新"):
+                st.rerun()
+        else:
+            st.info("登録されている大会データはまだありません。")
+    except Exception as e:
+        st.error(f"サマリーの取得に失敗しました。スキーマを確認してください。: {e}")
 
 with tab2:
     url = st.text_input("JARAのレース結果URLを入力してください", placeholder="https://www.jara.or.jp/race/...")
