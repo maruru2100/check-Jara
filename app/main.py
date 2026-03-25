@@ -88,6 +88,27 @@ def get_race_urls_from_top(top_url, html_content):
         
     return race_urls
 
+def parse_regatta_meta(html_content):
+    """大会TopのHTMLから開催日と場所を抽出する"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    main_text = soup.find('div', id='main').get_text() if soup.find('div', id='main') else ""
+    
+    start_date = None
+    location = None
+    
+    # 日程の抽出 (例: 2025年9月4日(木)～7日(日) -> 2025-09-04)
+    date_match = re.search(r'(?:期日|日程)[：:\s]*(\d{4})年(\d{1,2})月(\d{1,2})日', main_text)
+    if date_match:
+        year, month, day = date_match.groups()
+        start_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    
+    # 場所の抽出 (例: 場所：埼玉県戸田市・戸田ボートコース)
+    loc_match = re.search(r'場所[：:\s]*([^\n]+)', main_text)
+    if loc_match:
+        location = loc_match.group(1).strip()
+        
+    return start_date, location
+
 def format_time(time_str):
     """ '07:39.87' -> '00:07:39.87' """
     if not time_str: return None
@@ -279,6 +300,22 @@ def save_to_db(data, regatta_name, event_name):
 
     logger.info("=== DB保存プロセス終了 ===")
 
+def update_regatta_meta(regatta_name, start_date, location):
+    """大会テーブルの空いているカラム（日付・場所）を更新する"""
+    if not start_date and not location:
+        return
+        
+    with engine.begin() as conn:
+        # ON CONFLICTを使って、存在しなければ作成、存在すれば空のカラムのみ埋める
+        conn.execute(text("""
+            INSERT INTO regattas (name, start_date, location) 
+            VALUES (:name, :sd, :loc)
+            ON CONFLICT (name) DO UPDATE SET
+                start_date = COALESCE(regattas.start_date, EXCLUDED.start_date),
+                location = COALESCE(regattas.location, EXCLUDED.location)
+        """), {"name": regatta_name, "sd": start_date, "loc": location})
+        logger.info(f"大会メタ情報を更新/作成: {regatta_name} (開始日: {start_date}, 場所: {location})")
+
 # --- Streamlit UI ---
 st.title("Rowing Race Results Parser")
 
@@ -342,6 +379,10 @@ with tab2:
                         if child_urls:
                             # --- 一括取得モード ---
                             st.info(f"大会Topページを検出しました。{len(child_urls)}種目の取り込みを開始します。")
+                            # 追加：大会メタ情報（日付・場所）の取得と保存
+                            sd, loc = parse_regatta_meta(res_text)
+                            if reg_name and (sd or loc):
+                                update_regatta_meta(reg_name, sd, loc)
                             progress_bar = st.progress(0)
                             for idx, c_url in enumerate(child_urls):
                                 try:
