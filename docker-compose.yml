@@ -68,6 +68,17 @@ services:
     depends_on:
       - db
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: rowing_tunnel
+    # 外部公開したいサービスに合わせてURLを書き換えてください
+    command: tunnel --url http://check-jara-metabase:3000 --metrics 0.0.0.0:2000
+    restart: always
+    depends_on:
+      - metabase  # 公開対象が起動してからトンネルを立てる
+    profiles:
+      - external
+
 volumes:
   postgres_data:
   metabase_data:
