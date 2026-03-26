@@ -8,3 +8,6 @@ logs/*
 
 # バックアップファイルの除外
 backups/
+
+# --- local便利bat等 ---
+local/
