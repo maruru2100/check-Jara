@@ -53,4 +53,7 @@ metabaseリレーション設定
 | crew_members | crew_id | crews | id |
 | crew_members | rower_id | rowers | id| 
 
+```
+docker compose --profile external up -d
+```
 
